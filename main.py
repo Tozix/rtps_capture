@@ -1,14 +1,17 @@
+import argparse
+import datetime
+import decimal
 import logging
 import os
 import time
 from logging.handlers import RotatingFileHandler
-from threading import Thread
 
-import cv2
+import cv2 as cv
 
-from utils.ffmpeg import speedup_video
+from utils import ffmpeg
 
 VIDEOS_PATH = os.path.dirname(os.path.abspath(__file__))
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -26,82 +29,121 @@ file_log_handler.setFormatter(formatter)
 console_out_handler.setFormatter(formatter)
 logger.addHandler(file_log_handler)
 logger.addHandler(console_out_handler)
-
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-class RTSPVideoWriter(object):
-    def __init__(self, src=0, duration=10, filename='output.avi'):
-        self.capture = cv2.VideoCapture(src)
-        self.duration = duration
-        self.timeout = time.time()+duration
-        self.frame_count = 0
-        self.frame_width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.filename = filename
-        self.codec = cv2.VideoWriter_fourcc(*'MPEG')
-        self.output_video = cv2.VideoWriter(
-            self.filename, self.codec, 30, (self.frame_width, self.frame_height))
-        self.working = True
-        logger.debug('Запуск потока чтения кадров')
-        self.thread = Thread(target=self.update, args=())
-        self.thread.daemon = True
-        self.thread.start()
+def stream_write(src=0, duration=10, demo=False):
+    now = str(datetime.datetime.today().strftime("%Y-%m-%d-%H%M%S"))
+    filename = f'{VIDEOS_PATH}/{now}.avi'
+    capture = cv.VideoCapture(src)
+    frame_count = 0
+    frame_width = int(capture.get(
+        cv.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(capture.get(
+        cv.CAP_PROP_FRAME_HEIGHT))
+    codec = cv.VideoWriter_fourcc(*'XVID')
+    output_video = cv.VideoWriter(
+        filename, codec, 30, (
+            frame_width, frame_height))
 
-    def update(self):
-        '''Покадрово читаем поток.'''
-        while True:
-            if self.capture.isOpened():
-                (self.status, self.frame) = self.capture.read()
-
-    def show_frame(self):
-        '''Демонстрация захваченного видеопотока в отдельном окне.
-        Клавиша q, что бы завершить запись и демонстрацию
-        '''
-        if self.status:
-            cv2.imshow('frame', self.frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            self.capture.release()
-            self.output_video.release()
-            cv2.destroyAllWindows()
-            self.working = False
-
-    def stream_check(self):
-        ''''''
-        if not self.status:
+    while capture.isOpened():
+        ret, frame = capture.read()
+        if not ret:
             logger.error('Не смог получить кадр из потока')
-            self.capture.release()
-            self.output_video.release()
-        if time.time() > self.timeout:
-            logger.debug('Время вышло, закнчиваем запись!')
-            self.capture.release()
-            self.output_video.release()
-            self.working = False
+            break
+        if frame_count == 0:
+            timeout = time.time()+duration
+        if time.time() > timeout:
+            logger.debug('Завершение видеозахвата по времени')
+            break
 
-    def save_frame(self):
-        '''Сохраняет полученный кадр в выходной видеофайл.'''
-        self.frame_count += 1
-        self.output_video.write(self.frame)
+        output_video.write(frame)
+        frame_count += 1
+        if demo:
+            cv.imshow('Demo window', frame)
+            if cv.waitKey(1) == ord('q'):
+                logger.debug(
+                    'Завершение видеозахвата по нажатию клавишы'
+                )
+                break
+    else:
+        logger.debug('Нет соединения с RTSP потоком')
+
+    logger.debug(
+        f'Кол-во записанных кадров: {frame_count}'
+    )
+    capture.release()
+    output_video.release()
+    cv.destroyAllWindows()
+    refernce_frame_count = duration*30
+    logger.debug(
+        f'Ожидаемое кол-во кадров: {refernce_frame_count}'
+    )
+    diff_coef = frame_count/refernce_frame_count
+    logger.debug(f'Коэффициент разницы: {diff_coef}')
+    return filename, diff_coef
+
+
+def round_up(num, place=0):
+    """
+    Округляет вещественные числа.
+    place - число знаков после запятой
+    """
+    context = decimal.getcontext()
+    original_rounding = context.rounding
+    context.rounding = decimal.ROUND_CEILING
+    rounded = round(decimal.Decimal(str(num)), place)
+    context.rounding = original_rounding
+    return float(rounded)
+
+
+def get_size(file_path):
+    """Возвращает размер файла в МБ"""
+    size_in_bytes = os.path.getsize(file_path)
+    return round_up((size_in_bytes/1024/1024), 2)
 
 
 if __name__ == '__main__':
-    # rtsp_stream = 'http://46.229.128.35:81/mjpg/video.mjpg'
-    rtsp_stream = 'rtp://127.0.0.1:9999'
-    duration = 30
-    video_stream = RTSPVideoWriter(rtsp_stream, duration)
-    while video_stream.working:
-        try:
-            video_stream.stream_check()
-            # video_stream.show_frame()
-            video_stream.save_frame()
-        except AttributeError:
-            pass
-    else:
-        logger.debug(f'Кол-во кадров: {video_stream.frame_count}')
-    refernce_duration = duration*30
-    print('Кол-во кажро', video_stream.frame_count)
-    print('Коф. ускорения видео', video_stream.frame_count/refernce_duration)
-    speedup_video(f'{VIDEOS_PATH}/output.avi', f'{VIDEOS_PATH}/result.avi',
-                  video_stream.frame_count/refernce_duration)
+    parser = argparse.ArgumentParser(description='Справка:')
+    parser.add_argument(
+        "--stream",
+        "-s",
+        type=str,
+        help="URL RTSP потока"
+    )
+    parser.add_argument(
+        "--duration",
+        "-d",
+        type=int,
+        help="Продолжительность видеозахвата в секундах"
+    )
+    parser.add_argument(
+        "--demo_window",
+        "-w",
+        action='store_true',
+        help="Отображать видео в процессе захвата"
+    )
+    args = parser.parse_args()
+
+    if not args.stream:
+        parser.error(
+            'Не указан URL видеопотока! --stream STREAM'
+        )
+    video_filename, diff_coef = stream_write(
+        args.stream, args.duration, args.demo_window
+    )
+    logger.debug(
+        f'Размер полученного видео: {get_size(video_filename)} Мб'
+    )
+    if diff_coef > 1:
+        logger.debug('Нормализуем кол-во кадров')
+        video_filename = ffmpeg.speedup_video(video_filename, diff_coef)
+        logger.debug(
+            f'Размер видео после нормализации: {get_size(video_filename)} Мб'
+        )
+    new_video = ffmpeg.compress_video(video_filename)
+    logger.debug('Сжатие видео')
+    logger.debug(
+        f'Размер видео после сжатия": {get_size(new_video)} Мб'
+    )
